@@ -1,2 +1,4 @@
-discord.py==2.3.2
-yfinance==0.2.37
+discord.py
+yfinance>=0.2.38
+requests
+flask
