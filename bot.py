@@ -1,30 +1,19 @@
 import os
 import json
 import threading
-import requests
+from curl_cffi import requests as curl_requests
 import yfinance as yf
 import discord
 from discord.ext import commands, tasks
 from flask import Flask
 
-# ==========================================
-# KONFIGURACJA
-# ==========================================
 TICKER = "AMD"
 NAME = "AMD"
 CURRENCY = "PLN"
 PORTFOLIO_FILE = "portfolio.json"
 
-ALERT_CHANNEL_ID = 0  # Opcjonalnie ID kanału dla alertów
+ALERT_CHANNEL_ID = 0
 
-session = requests.Session()
-session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-})
-
-# ==========================================
-# SERWER FLASK (DLA RENDER.COM & KEEP-ALIVE)
-# ==========================================
 app = Flask(__name__)
 
 @app.route('/')
@@ -35,9 +24,6 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# ==========================================
-# ZARZĄDZANIE PORTFELEM (JSON)
-# ==========================================
 def load_portfolio():
     if not os.path.exists(PORTFOLIO_FILE):
         return {}
@@ -51,32 +37,28 @@ def save_portfolio(data):
     with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
 
-# ==========================================
-# POBIERANIE DANYCH GIEŁDOWYCH (USD -> PLN)
-# ==========================================
-def get_amd_data():
+def get_market_data():
     try:
-        amd = yf.Ticker(TICKER, session=session)
-        hist_amd = amd.history(period="1mo")
-        if hist_amd.empty:
+        session = curl_requests.Session(impersonate="chrome")
+        stock = yf.Ticker(TICKER, session=session)
+        hist_stock = stock.history(period="1mo")
+        if hist_stock.empty:
             return None, None, None, None
 
-        cena_usd = hist_amd['Close'].iloc[-1]
+        cena_usd = float(hist_stock['Close'].iloc[-1])
         
-        if len(hist_amd) >= 2:
-            poprzednia_cena_usd = hist_amd['Close'].iloc[-2]
+        if len(hist_stock) >= 2:
+            poprzednia_cena_usd = float(hist_stock['Close'].iloc[-2])
             zmiana_pct = ((cena_usd - poprzednia_cena_usd) / poprzednia_cena_usd) * 100
         else:
             zmiana_pct = 0.0
 
-        usd_pln_ticker = yf.Ticker("USDPLN=X", session=session)
-        hist_usd_pln = usd_pln_ticker.history(period="1mo")
-        if not hist_usd_pln.empty:
-            kurs_usd = hist_usd_pln['Close'].iloc[-1]
+        fx_ticker = yf.Ticker("USDPLN=X", session=session)
+        hist_fx = fx_ticker.history(period="1mo")
+        if not hist_fx.empty:
+            kurs_usd = float(hist_fx['Close'].iloc[-1])
         else:
-            usd_pln_alt = yf.Ticker("PLN=X", session=session)
-            hist_alt = usd_pln_alt.history(period="1mo")
-            kurs_usd = hist_alt['Close'].iloc[-1] if not hist_alt.empty else 4.0
+            kurs_usd = 4.00
 
         cena_pln = cena_usd * kurs_usd
         return cena_pln, cena_usd, kurs_usd, zmiana_pct
@@ -85,9 +67,6 @@ def get_amd_data():
         print(f"Błąd pobierania danych giełdowych: {e}")
         return None, None, None, None
 
-# ==========================================
-# DISCORD BOT SETUP
-# ==========================================
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -112,14 +91,9 @@ async def on_ready():
     if not check_alerts.is_running():
         check_alerts.start()
 
-# ==========================================
-# KOMENDY DISCORD
-# ==========================================
-
 @bot.command(name="kurs")
 async def kurs(ctx):
-    """Wyświetla aktualny kurs AMD oraz precyzyjne rekomendacje."""
-    cena_pln, cena_usd, kurs_usd, zmiana_pct = get_amd_data()
+    cena_pln, cena_usd, kurs_usd, zmiana_pct = get_market_data()
 
     if cena_pln is None:
         await ctx.send("❌ Błąd podczas pobierania danych z giełdy. Spróbuj ponownie za chwilę.")
@@ -128,8 +102,8 @@ async def kurs(ctx):
     emoji = "🟢" if zmiana_pct >= 0 else "🔴"
     
     msg = f"**• Kurs {NAME} ({TICKER}):**\n"
-    msg += f"💵 Cena: **{cena_pln:.2f} PLN** ({cena_usd:.2f} USD | kurs USD: {kurs_usd:.2f} PLN)\n"
-    msg += f"{emoji} Zmiana dzienna: **{zmiana_pct:+.2f}%**\n\n"
+    msg += f"💵 Cena: **{cena_pln:.2f} PLN** ({cena_usd:.2f} USD | USD/PLN: {kurs_usd:.2f})\n"
+    msg += f"{emoji} Zmiana dzienna giełdy: **{zmiana_pct:+.2f}%**\n\n"
 
     portfolio = load_portfolio()
     user_id = str(ctx.author.id)
@@ -165,7 +139,6 @@ async def kurs(ctx):
 
 @bot.command(name="kup")
 async def kup(ctx, ilosc: float, cena_pln: float):
-    """Rejestruje zakup akcji w PLN (np. !kup 0.004 10)."""
     if ilosc <= 0 or cena_pln <= 0:
         await ctx.send("❌ Ilość oraz cena muszą być większe od zera.")
         return
@@ -205,7 +178,6 @@ async def kup(ctx, ilosc: float, cena_pln: float):
 
 @bot.command(name="sprzedaj")
 async def sprzedaj(ctx, ilosc: float, cena_pln: float):
-    """Rejestruje sprzedaż akcji w PLN (np. !sprzedaj 0.001 10.32)."""
     portfolio = load_portfolio()
     user_id = str(ctx.author.id)
 
@@ -245,7 +217,6 @@ async def sprzedaj(ctx, ilosc: float, cena_pln: float):
 
 @bot.command(name="portfel")
 async def portfel(ctx):
-    """Wyświetla podsumowanie Twojego portfela."""
     portfolio = load_portfolio()
     user_id = str(ctx.author.id)
 
@@ -258,7 +229,7 @@ async def portfel(ctx):
     sr_cena = u["srednia_cena"]
     zrealizowany = u.get("zrealizowany_zysk", 0.0)
 
-    cena_pln, cena_usd, kurs_usd, zmiana_pct = get_amd_data()
+    cena_pln, cena_usd, kurs_usd, zmiana_pct = get_market_data()
 
     if cena_pln is None:
         await ctx.send("❌ Błąd podczas odczytu aktualnego kursu giełdowego.")
@@ -282,13 +253,10 @@ async def portfel(ctx):
 
     await ctx.send(msg)
 
-# ==========================================
-# AUTOMATYCZNE ALERTY (CO 15 MINUT)
-# ==========================================
 @tasks.loop(minutes=15)
 async def check_alerts():
     global last_alert_pct
-    cena_pln, cena_usd, kurs_usd, zmiana_pct = get_amd_data()
+    cena_pln, cena_usd, kurs_usd, zmiana_pct = get_market_data()
 
     if cena_pln is None:
         return
@@ -368,9 +336,6 @@ async def check_alerts():
     if updated_portfolio:
         save_portfolio(portfolio)
 
-# ==========================================
-# URUCHOMIENIE BOTA
-# ==========================================
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
 
