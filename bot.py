@@ -15,11 +15,8 @@ NAME = "AMD"
 CURRENCY = "PLN"
 PORTFOLIO_FILE = "portfolio.json"
 
-# ID kanału powiadomień dla alertów (opcjonalnie).
-# Jeśli zostawisz 0, bot wyśle alert na pierwszy dostępny kanał tekstowy.
-ALERT_CHANNEL_ID = 0  
+ALERT_CHANNEL_ID = 0  # Opcjonalnie ID kanału dla alertów
 
-# Tworzenie sesji HTTP z nagłówkiem User-Agent (ochrona przed blokadą Yahoo Finance)
 session = requests.Session()
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -58,12 +55,7 @@ def save_portfolio(data):
 # POBIERANIE DANYCH GIEŁDOWYCH (USD -> PLN)
 # ==========================================
 def get_amd_data():
-    """
-    Pobiera dane dla AMD w USD oraz aktualny kurs USD/PLN,
-    zwracając przeliczoną cenę w PLN, cenę w USD oraz zmianę procentową.
-    """
     try:
-        # 1. Pobranie danych dla akcji AMD
         amd = yf.Ticker(TICKER, session=session)
         hist_amd = amd.history(period="1mo")
         if hist_amd.empty:
@@ -71,25 +63,21 @@ def get_amd_data():
 
         cena_usd = hist_amd['Close'].iloc[-1]
         
-        # Obliczenie zmiany procentowej z ostatniej znanej sesji
         if len(hist_amd) >= 2:
             poprzednia_cena_usd = hist_amd['Close'].iloc[-2]
             zmiana_pct = ((cena_usd - poprzednia_cena_usd) / poprzednia_cena_usd) * 100
         else:
             zmiana_pct = 0.0
 
-        # 2. Pobranie kursu walutowego USD/PLN
         usd_pln_ticker = yf.Ticker("USDPLN=X", session=session)
         hist_usd_pln = usd_pln_ticker.history(period="1mo")
         if not hist_usd_pln.empty:
             kurs_usd = hist_usd_pln['Close'].iloc[-1]
         else:
-            # Rezerwowy ticker kursu dolara
             usd_pln_alt = yf.Ticker("PLN=X", session=session)
             hist_alt = usd_pln_alt.history(period="1mo")
             kurs_usd = hist_alt['Close'].iloc[-1] if not hist_alt.empty else 4.0
 
-        # 3. Przeliczenie ceny na PLN
         cena_pln = cena_usd * kurs_usd
         return cena_pln, cena_usd, kurs_usd, zmiana_pct
 
@@ -106,6 +94,18 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 last_alert_pct = 0.0
 
+async def broadcast_message(message_text):
+    if ALERT_CHANNEL_ID != 0:
+        channel = bot.get_channel(ALERT_CHANNEL_ID)
+        if channel:
+            await channel.send(message_text)
+    else:
+        for guild in bot.guilds:
+            for channel in guild.text_channels:
+                if channel.permissions_for(guild.me).send_messages:
+                    await channel.send(message_text)
+                    break
+
 @bot.event
 async def on_ready():
     print(f"Bot zalogowany jako: {bot.user.name}")
@@ -118,7 +118,7 @@ async def on_ready():
 
 @bot.command(name="kurs")
 async def kurs(ctx):
-    """Wyświetla aktualny kurs AMD przeliczony na PLN oraz rekomendację."""
+    """Wyświetla aktualny kurs AMD oraz precyzyjne rekomendacje."""
     cena_pln, cena_usd, kurs_usd, zmiana_pct = get_amd_data()
 
     if cena_pln is None:
@@ -131,7 +131,6 @@ async def kurs(ctx):
     msg += f"💵 Cena: **{cena_pln:.2f} PLN** ({cena_usd:.2f} USD | kurs USD: {kurs_usd:.2f} PLN)\n"
     msg += f"{emoji} Zmiana dzienna: **{zmiana_pct:+.2f}%**\n\n"
 
-    # Sprawdzenie indywidualnego portfela użytkownika
     portfolio = load_portfolio()
     user_id = str(ctx.author.id)
     
@@ -139,26 +138,34 @@ async def kurs(ctx):
         u_data = portfolio[user_id]
         sr_cena = u_data["srednia_cena"]
         zysk_pct = ((cena_pln - sr_cena) / sr_cena) * 100
+        ilosc = u_data["ilosc"]
         
         msg += f"**TWÓJ PORTFEL:**\n"
-        msg += f"📦 Posiadasz: **{u_data['ilosc']:.4f}** akcji\n"
+        msg += f"📦 Posiadasz: **{ilosc:.4f}** akcji\n"
         msg += f"📊 Średnia cena zakupu: **{sr_cena:.2f} PLN**\n"
-        msg += f"📈 Twój zysk/strata: **{zysk_pct:+.2f}%**\n\n"
+        msg += f"📈 Wynik od zakupu: **{zysk_pct:+.2f}%**\n\n"
 
-        if zysk_pct >= 5.0:
-            msg += "💡 *Rekomendacja:* Masz ładny zysk (+5%)! Rozważ realizację części zysków (np. sprzedaż 20-30% akcji)."
-        elif zysk_pct <= -5.0:
-            msg += "💡 *Rekomendacja:* Kurs spadł poniżej Twojej średniej. Dobry moment na uśrednienie ceny zakupu na XTB."
+        if zysk_pct >= 12.0:
+            sztuki = ilosc * 0.50
+            msg += f"🔥 **TERAZ OPŁACA SIĘ SPRZEDAĆ! (+12%)**\nSprzedaj 50% pozostałej pozycji (**{sztuki:.4f}** szt.):\n`!sprzedaj {sztuki:.4f} {cena_pln:.2f}`"
+        elif zysk_pct >= 7.0:
+            sztuki = ilosc * 0.30
+            msg += f"🚀 **TERAZ OPŁACA SIĘ SPRZEDAĆ! (+7%)**\nSprzedaj kolejne 30% pozycji (**{sztuki:.4f}** szt.):\n`!sprzedaj {sztuki:.4f} {cena_pln:.2f}`"
+        elif zysk_pct >= 3.0:
+            sztuki = ilosc * 0.25
+            msg += f"🟢 **TERAZ OPŁACA SIĘ SPRZEDAĆ! (+3%)**\nZabezpiecz zysk sprzedając 25% akcji (**{sztuki:.4f}** szt.):\n`!sprzedaj {sztuki:.4f} {cena_pln:.2f}`"
+        elif zysk_pct <= -4.0:
+            msg += f"📉 **TERAZ OPŁACA SIĘ KUPIĆ! (-4%)**\nCena spadła od zakupu. Dobry moment na dokupienie akcji na XTB, żeby obniżyć średnią cenę."
         else:
-            msg += "💡 *Rekomendacja:* Pozycja stabilna. Trzymaj akcje i obserwuj rynek."
+            msg += "💡 **CZEKAJ:** Pozycja stabilna. Nie opłaca się teraz kupować ani sprzedawać."
     else:
-        msg += "💡 *Brak akcji w portfelu:* Wpisz `!kup <ilość> <cena_w_PLN>`, aby zacząć śledzić swoje inwestycje."
+        msg += "💡 *Brak akcji w portfelu:* Wpisz `!kup <ilość> <cena_w_PLN>`, aby zacząć śledzić pozycję."
 
     await ctx.send(msg)
 
 @bot.command(name="kup")
 async def kup(ctx, ilosc: float, cena_pln: float):
-    """Rejestruje zakup akcji w PLN (np. !kup 0.5 620.50)."""
+    """Rejestruje zakup akcji w PLN (np. !kup 0.004 10)."""
     if ilosc <= 0 or cena_pln <= 0:
         await ctx.send("❌ Ilość oraz cena muszą być większe od zera.")
         return
@@ -167,7 +174,13 @@ async def kup(ctx, ilosc: float, cena_pln: float):
     user_id = str(ctx.author.id)
 
     if user_id not in portfolio:
-        portfolio[user_id] = {"ilosc": 0.0, "srednia_cena": 0.0, "zrealizowany_zysk": 0.0}
+        portfolio[user_id] = {
+            "ilosc": 0.0, 
+            "srednia_cena": 0.0, 
+            "zrealizowany_zysk": 0.0, 
+            "profit_stage": 0,
+            "dip_alert_sent": False
+        }
 
     u = portfolio[user_id]
     stara_ilosc = u.get("ilosc", 0.0)
@@ -178,6 +191,9 @@ async def kup(ctx, ilosc: float, cena_pln: float):
 
     u["ilosc"] = nowa_ilosc
     u["srednia_cena"] = nowa_srednia
+    u["profit_stage"] = 0
+    u["dip_alert_sent"] = False
+
     save_portfolio(portfolio)
 
     await ctx.send(
@@ -189,7 +205,7 @@ async def kup(ctx, ilosc: float, cena_pln: float):
 
 @bot.command(name="sprzedaj")
 async def sprzedaj(ctx, ilosc: float, cena_pln: float):
-    """Rejestruje sprzedaż akcji w PLN (np. !sprzedaj 0.2 680.00)."""
+    """Rejestruje sprzedaż akcji w PLN (np. !sprzedaj 0.001 10.32)."""
     portfolio = load_portfolio()
     user_id = str(ctx.author.id)
 
@@ -214,6 +230,8 @@ async def sprzedaj(ctx, ilosc: float, cena_pln: float):
     if u["ilosc"] <= 0.00001:
         u["ilosc"] = 0.0
         u["srednia_cena"] = 0.0
+        u["profit_stage"] = 0
+        u["dip_alert_sent"] = False
 
     save_portfolio(portfolio)
 
@@ -227,7 +245,7 @@ async def sprzedaj(ctx, ilosc: float, cena_pln: float):
 
 @bot.command(name="portfel")
 async def portfel(ctx):
-    """Wyświetla pełne podsumowanie Twojego portfela AMD."""
+    """Wyświetla podsumowanie Twojego portfela."""
     portfolio = load_portfolio()
     user_id = str(ctx.author.id)
 
@@ -265,7 +283,7 @@ async def portfel(ctx):
     await ctx.send(msg)
 
 # ==========================================
-# AUTOMATYCZNE ALERTY CENOWE (CO 15 MINUT)
+# AUTOMATYCZNE ALERTY (CO 15 MINUT)
 # ==========================================
 @tasks.loop(minutes=15)
 async def check_alerts():
@@ -275,38 +293,89 @@ async def check_alerts():
     if cena_pln is None:
         return
 
-    # Sprawdzanie progu +/- 3%
     if abs(zmiana_pct) >= 3.0 and abs(zmiana_pct - last_alert_pct) >= 1.0:
         last_alert_pct = zmiana_pct
         emoji = "🚀" if zmiana_pct > 0 else "⚠️"
-        
-        alert_msg = (
-            f"{emoji} **ALERT CENOWY {NAME}!**\n"
-            f"Aktualny kurs uległ znacznej zmianie: **{cena_pln:.2f} PLN** ({zmiana_pct:+.2f}% dzisiaj).\n"
-            f"Sprawdź swój portfel wpisując `!portfel`!"
-        )
+        alert_msg = f"{emoji} **ALERT GIEŁDOWY {NAME}!**\nAktualny kurs uległ znacznej zmianie dzisiaj: **{cena_pln:.2f} PLN** ({zmiana_pct:+.2f}%)."
+        await broadcast_message(alert_msg)
 
-        if ALERT_CHANNEL_ID != 0:
-            channel = bot.get_channel(ALERT_CHANNEL_ID)
-            if channel:
-                await channel.send(alert_msg)
-        else:
-            for guild in bot.guilds:
-                for channel in guild.text_channels:
-                    if channel.permissions_for(guild.me).send_messages:
-                        await channel.send(alert_msg)
-                        break
+    portfolio = load_portfolio()
+    updated_portfolio = False
+
+    for user_id, u_data in portfolio.items():
+        ilosc = u_data.get("ilosc", 0.0)
+        sr_cena = u_data.get("srednia_cena", 0.0)
+
+        if ilosc > 0 and sr_cena > 0:
+            zysk_pct = ((cena_pln - sr_cena) / sr_cena) * 100
+            stage = u_data.get("profit_stage", 0)
+            dip_sent = u_data.get("dip_alert_sent", False)
+
+            if zysk_pct >= 3.0 and stage < 1:
+                sprzedaj_sztuk = round(ilosc * 0.25, 4)
+                if sprzedaj_sztuk > 0:
+                    msg = (
+                        f"🟢 <@{user_id}> **TERAZ OPŁACA SIĘ SPRZEDAĆ! (ZYSK +3%)**\n"
+                        f"Twoje akcje {NAME} wzrosły o **{zysk_pct:+.2f}%** od zakupu!\n"
+                        f"💡 **Rekomendacja:** Sprzedaj **25%** akcji (**{sprzedaj_sztuk:.4f}** szt.):\n"
+                        f"`!sprzedaj {sprzedaj_sztuk:.4f} {cena_pln:.2f}`"
+                    )
+                    await broadcast_message(msg)
+                    u_data["profit_stage"] = 1
+                    updated_portfolio = True
+
+            elif zysk_pct >= 7.0 and stage < 2:
+                sprzedaj_sztuk = round(ilosc * 0.30, 4)
+                if sprzedaj_sztuk > 0:
+                    msg = (
+                        f"🚀 <@{user_id}> **TERAZ OPŁACA SIĘ SPRZEDAĆ! (ZYSK +7%)**\n"
+                        f"Kurs rośnie dalej! Zysk wynosi **{zysk_pct:+.2f}%**!\n"
+                        f"💡 **Rekomendacja:** Sprzedaj kolejne **30%** z pozostałych akcji (**{sprzedaj_sztuk:.4f}** szt.):\n"
+                        f"`!sprzedaj {sprzedaj_sztuk:.4f} {cena_pln:.2f}`"
+                    )
+                    await broadcast_message(msg)
+                    u_data["profit_stage"] = 2
+                    updated_portfolio = True
+
+            elif zysk_pct >= 12.0 and stage < 3:
+                sprzedaj_sztuk = round(ilosc * 0.50, 4)
+                if sprzedaj_sztuk > 0:
+                    msg = (
+                        f"🔥 <@{user_id}> **TERAZ OPŁACA SIĘ SPRZEDAĆ! (ZYSK +12%)**\n"
+                        f"Mocny rajd! Zysk przekroczył **{zysk_pct:+.2f}%**!\n"
+                        f"💡 **Rekomendacja:** Zrealizuj połowę z reszty akcji (**{sprzedaj_sztuk:.4f}** szt.):\n"
+                        f"`!sprzedaj {sprzedaj_sztuk:.4f} {cena_pln:.2f}`"
+                    )
+                    await broadcast_message(msg)
+                    u_data["profit_stage"] = 3
+                    updated_portfolio = True
+
+            elif zysk_pct <= -4.0 and not dip_sent:
+                msg = (
+                    f"📉 <@{user_id}> **TERAZ OPŁACA SIĘ KUPIĆ! (SPADEK -4%)**\n"
+                    f"Cena (**{cena_pln:.2f} PLN**) jest o **{zysk_pct:.2f}%** niższa od Twojej średniej zakupu (**{sr_cena:.2f} PLN**).\n"
+                    f"💡 **Rekomendacja:** Dokup małą paczkę akcji na XTB, aby obniżyć średnią cenę!\n"
+                    f"Po zakupie wpisz: `!kup <ilość> {cena_pln:.2f}`"
+                )
+                await broadcast_message(msg)
+                u_data["dip_alert_sent"] = True
+                updated_portfolio = True
+
+            elif zysk_pct > -2.0 and dip_sent:
+                u_data["dip_alert_sent"] = False
+                updated_portfolio = True
+
+    if updated_portfolio:
+        save_portfolio(portfolio)
 
 # ==========================================
 # URUCHOMIENIE BOTA
 # ==========================================
 if __name__ == "__main__":
-    # Serwer Flask w tle dla Render.com
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # Logowanie tokenem Discorda
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
-        print("❌ BŁĄD: Brak zmiennej środowiskowej DISCORD_TOKEN w panelu Render.com!")
+        print("❌ BŁĄD: Brak zmiennej środowiskowej DISCORD_TOKEN!")
     else:
         bot.run(token)
