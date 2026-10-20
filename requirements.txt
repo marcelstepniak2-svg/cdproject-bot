@@ -1,4 +1,5 @@
-discord.py
+discord.py==2.3.2
 yfinance>=0.2.38
-requests
-flask
+requests==2.31.0
+curl_cffi>=0.5.10
+flask==3.0.2
